@@ -23,3 +23,7 @@ jobs:
         run: zig build test
       - name: Release build
         run: zig build -Doptimize=ReleaseFast
+      - name: Windows cross-compile (ReleaseFast)
+        run: zig build -Dtarget=x86_64-windows -Doptimize=ReleaseFast
+      - name: Windows cross-compile ctxline tests (no exec)
+        run: zig test src/ctxline.zig -target x86_64-windows -O ReleaseFast --test-no-exec

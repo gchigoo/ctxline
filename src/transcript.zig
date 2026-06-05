@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const builtin = @import("builtin");
 
 pub const EstimateOptions = struct {
     max_transcript_bytes: usize = 4 * 1024 * 1024,
@@ -57,16 +58,21 @@ fn parseLineBytes(allocator: Allocator, line: []const u8, opts: EstimateOptions)
     return countVisibleBytes(parsed.value, false);
 }
 
-pub fn estimateFromJsonlFile(allocator: Allocator, path: []const u8, opts: EstimateOptions) u64 {
+pub fn estimateFromJsonlFile(io: std.Io, allocator: Allocator, path: []const u8, opts: EstimateOptions) u64 {
     const max = opts.max_transcript_bytes;
-    const bytes = readFileLimited(allocator, path, max) catch return 0;
+    const bytes = readFileLimited(io, allocator, path, max) catch return 0;
     defer allocator.free(bytes);
     return estimateFromJsonlBytes(allocator, bytes, opts);
 }
 
-fn readFileLimited(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
+fn readFileLimited(io: std.Io, allocator: Allocator, path: []const u8, max: usize) ![]u8 {
     if (max == 0) return try allocator.alloc(u8, 0);
+    if (builtin.os.tag == .windows) return readFileLimitedWindows(io, allocator, path, max);
 
+    return readFileLimitedPosix(allocator, path, max);
+}
+
+fn readFileLimitedPosix(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
     defer _ = std.posix.system.close(fd);
     try ensureRegularFile(fd);
@@ -92,8 +98,34 @@ fn readFileLimited(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
     return output.toOwnedSlice(allocator);
 }
 
+fn readFileLimitedWindows(io: std.Io, allocator: Allocator, path: []const u8, max: usize) ![]u8 {
+    const cwd = std.Io.Dir.cwd();
+    const stat = try cwd.statFile(io, path, .{});
+    if (stat.kind != .file) return error.NotRegularFile;
+
+    const file = try cwd.openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    var output = try std.ArrayList(u8).initCapacity(allocator, @min(max, 4096));
+    errdefer output.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+    var remaining: usize = max;
+    var offset: u64 = 0;
+
+    while (remaining > 0) {
+        const read_len = @min(remaining, chunk.len);
+        const bytes_read = try file.readPositional(io, &.{chunk[0..read_len]}, offset);
+        if (bytes_read == 0) break;
+        try output.appendSlice(allocator, chunk[0..bytes_read]);
+        remaining -= bytes_read;
+        offset += bytes_read;
+    }
+
+    // Keep the bounded prefix instead of failing on oversized transcripts.
+    return output.toOwnedSlice(allocator);
+}
+
 fn ensureRegularFile(fd: std.posix.fd_t) !void {
-    const builtin = @import("builtin");
     if (builtin.os.tag == .linux) return ensureRegularFileLinux(fd);
     return ensureRegularFilePosix(fd);
 }
@@ -185,7 +217,7 @@ test "file estimator keeps bounded prefix for oversized transcripts" {
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = content });
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
 
-    const estimate = estimateFromJsonlFile(allocator, path, .{
+    const estimate = estimateFromJsonlFile(std.testing.io, allocator, path, .{
         .max_transcript_bytes = first_line.len,
         .transcript_bytes_per_token = 1,
     });
@@ -198,7 +230,7 @@ test "file estimator ignores non-regular paths" {
     try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
     defer std.Io.Dir.cwd().deleteDir(std.testing.io, path) catch {};
 
-    const estimate = estimateFromJsonlFile(allocator, path, .{
+    const estimate = estimateFromJsonlFile(std.testing.io, allocator, path, .{
         .max_transcript_bytes = 1024,
         .transcript_bytes_per_token = 1,
     });

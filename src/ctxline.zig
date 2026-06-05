@@ -26,6 +26,7 @@ pub const noStatusLine = "ctxline │ no status json";
 const fallback_model = "ctxline";
 
 pub fn contextUsageFromStatusJson(
+    io: std.Io,
     allocator: std.mem.Allocator,
     input: []const u8,
     options: Options,
@@ -68,7 +69,7 @@ pub fn contextUsageFromStatusJson(
             .max_transcript_bytes = options.max_transcript_bytes,
             .transcript_bytes_per_token = options.transcript_bytes_per_token,
         };
-        const used_tokens = transcript.estimateFromJsonlFile(allocator, transcript_path, estimate_opts);
+        const used_tokens = transcript.estimateFromJsonlFile(io, allocator, transcript_path, estimate_opts);
         const pct = estimatePercentFromCounts(used_tokens, 0, max_tokens);
 
         return ContextUsage{
@@ -121,6 +122,7 @@ test "native context usage from status line" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-pro[1m]\"},\"context_window\":{\"used_percentage\":38.2,\"total_input_tokens\":380000,\"total_output_tokens\":2000,\"context_window_size\":1000000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -140,6 +142,7 @@ test "derive native used tokens from percentage" {
 
     const input = "{\"model\":{\"display_name\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":25.0,\"context_window_size\":128000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -164,6 +167,7 @@ test "transcript fallback usage" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"transcript_path\":\"tmp_ctxline_transcript.jsonl\"}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -185,6 +189,7 @@ test "malformed status json is surfaced by caller" {
     const input = "not json";
     try std.testing.expectError(error.InvalidPayload, status_json.parseStatusInput(allocator, input));
     try std.testing.expectError(error.InvalidPayload, contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -217,6 +222,7 @@ test "invalid native percentage falls back when no valid native counts" {
 
     const input = "{\"model\":{\"display_name\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":125.0,\"context_window_size\":128000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -237,6 +243,7 @@ test "overflowing native token sum is ignored" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"total_input_tokens\":10000000000000000000,\"total_output_tokens\":10000000000000000000,\"context_window_size\":128000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -256,6 +263,7 @@ test "partially invalid native token fields are ignored" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"total_input_tokens\":1.5,\"total_output_tokens\":1,\"context_window_size\":128000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -275,6 +283,7 @@ test "large native integers are not rounded into valid usage" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"total_input_tokens\":9007199254740993,\"context_window_size\":9007199254740992}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -294,6 +303,7 @@ test "native counts drive used tokens when percentage is also present" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":1.1,\"total_input_tokens\":1234,\"context_window_size\":128000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},
@@ -313,6 +323,7 @@ test "valid percentage does not mask invalid native token sum" {
 
     const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":1.0,\"total_input_tokens\":1000,\"total_output_tokens\":1,\"context_window_size\":1000}}";
     const usage = try contextUsageFromStatusJson(
+        std.testing.io,
         allocator,
         input,
         .{},

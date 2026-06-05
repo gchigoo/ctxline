@@ -2,41 +2,46 @@ const std = @import("std");
 
 const ctxline = @import("ctxline");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     const options = ctxline.Options{};
 
-    const input = readBoundedFromStdin(options.max_stdin_bytes) catch {
-        try writeLine(ctxline.noStatusLine);
+    const input = readBoundedFromStdin(io, options.max_stdin_bytes) catch {
+        try writeLine(io, ctxline.noStatusLine);
         return;
     };
     defer std.heap.page_allocator.free(input);
 
-    const usage = ctxline.contextUsageFromStatusJson(std.heap.page_allocator, input, options) catch {
-        try writeLine(ctxline.noStatusLine);
+    const usage = ctxline.contextUsageFromStatusJson(io, std.heap.page_allocator, input, options) catch {
+        try writeLine(io, ctxline.noStatusLine);
         return;
     };
 
     const line = ctxline.formatContextLine(std.heap.page_allocator, usage, options) catch {
-        try writeLine(ctxline.noStatusLine);
+        try writeLine(io, ctxline.noStatusLine);
         return;
     };
     defer std.heap.page_allocator.free(line);
 
-    try writeLine(line);
+    try writeLine(io, line);
 }
 
-fn readBoundedFromStdin(max_bytes: usize) ![]u8 {
+fn readBoundedFromStdin(io: std.Io, max_bytes: usize) ![]u8 {
     if (max_bytes == 0) return try std.heap.page_allocator.alloc(u8, 0);
 
     var output = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, @min(max_bytes, 4096));
     errdefer output.deinit(std.heap.page_allocator);
 
+    const stdin = std.Io.File.stdin();
     var chunk: [4096]u8 = undefined;
     var remaining = max_bytes;
 
     while (remaining > 0) {
         const read_len = @min(remaining, chunk.len);
-        const bytes_read = try std.posix.read(std.posix.STDIN_FILENO, chunk[0..read_len]);
+        const bytes_read = stdin.readStreaming(io, &.{chunk[0..read_len]}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
         if (bytes_read == 0) break;
         try output.appendSlice(std.heap.page_allocator, chunk[0..bytes_read]);
         remaining -= bytes_read;
@@ -44,13 +49,22 @@ fn readBoundedFromStdin(max_bytes: usize) ![]u8 {
 
     if (remaining == 0) {
         var extra: [1]u8 = undefined;
-        if (try std.posix.read(std.posix.STDIN_FILENO, extra[0..]) > 0) return error.InvalidPayload;
+        const extra_bytes = stdin.readStreaming(io, &.{extra[0..]}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
+        if (extra_bytes > 0) return error.InvalidPayload;
     }
 
     return output.toOwnedSlice(std.heap.page_allocator);
 }
 
-fn writeLine(text: []const u8) !void {
-    _ = std.posix.system.write(std.posix.STDOUT_FILENO, text.ptr, text.len);
-    _ = std.posix.system.write(std.posix.STDOUT_FILENO, "\n".ptr, 1);
+fn writeLine(io: std.Io, text: []const u8) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_file_writer: std.Io.File.Writer = .init(std.Io.File.stdout(), io, &stdout_buffer);
+    const stdout = &stdout_file_writer.interface;
+
+    try stdout.writeAll(text);
+    try stdout.writeByte('\n');
+    try stdout.flush();
 }
