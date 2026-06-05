@@ -37,26 +37,30 @@ pub fn contextUsageFromStatusJson(
         if (status.transcript_path) |transcript_path| allocator.free(transcript_path);
     }
     const max_tokens = status.context_window_size orelse models.contextWindowForModel(model);
-    const has_native_pct = status.used_percentage != null;
-    const has_native_tokens = status.total_input_tokens != null or status.total_output_tokens != null;
 
-    if (has_native_pct or has_native_tokens) {
-        const pct = status.used_percentage orelse
-            estimatePercentFromCounts(status.total_input_tokens, status.total_output_tokens, max_tokens);
-        const used = if (has_native_tokens)
-            ((status.total_input_tokens orelse 0) + (status.total_output_tokens orelse 0))
-        else if (status.used_percentage) |used_percentage|
-            estimateTokensFromPercent(used_percentage, max_tokens)
-        else
-            estimateTokensFromPercent(pct, max_tokens);
-
-        return ContextUsage{
-            .model = model,
-            .used_tokens = used,
-            .max_tokens = max_tokens,
-            .percent = pct,
-            .mode = .native,
-        };
+    if (!status.invalid_context_window) {
+        if (status.total_input_tokens != null or status.total_output_tokens != null) {
+            const total_input_tokens = status.total_input_tokens orelse 0;
+            const total_output_tokens = status.total_output_tokens orelse 0;
+            const sum = @addWithOverflow(total_input_tokens, total_output_tokens);
+            if (sum[1] == 0 and sum[0] <= max_tokens) {
+                return ContextUsage{
+                    .model = model,
+                    .used_tokens = sum[0],
+                    .max_tokens = max_tokens,
+                    .percent = status.used_percentage orelse estimatePercentFromCounts(sum[0], 0, max_tokens),
+                    .mode = .native,
+                };
+            }
+        } else if (status.used_percentage) |percent| {
+            return ContextUsage{
+                .model = model,
+                .used_tokens = estimateTokensFromPercent(percent, max_tokens),
+                .max_tokens = max_tokens,
+                .percent = percent,
+                .mode = .native,
+            };
+        }
     }
 
     if (status.transcript_path) |transcript_path| {
@@ -90,10 +94,10 @@ fn estimateTokensFromPercent(percent: f64, max_tokens: u64) u64 {
     return @intFromFloat(std.math.floor((percent * @as(f64, @floatFromInt(max_tokens))) / 100.0));
 }
 
-fn estimatePercentFromCounts(used_tokens: ?u64, output_tokens: ?u64, max_tokens: u64) f64 {
+fn estimatePercentFromCounts(used_tokens: u64, output_tokens: u64, max_tokens: u64) f64 {
     const max = @as(f64, @floatFromInt(max_tokens));
     if (max == 0) return 0.0;
-    const used = @as(f64, @floatFromInt((used_tokens orelse 0) + (output_tokens orelse 0)));
+    const used = @as(f64, @floatFromInt(used_tokens + output_tokens));
     return (used / max) * 100.0;
 }
 
@@ -206,4 +210,119 @@ test "output formatting is one line and safe" {
     const bar_count = std.mem.count(u8, line, "█");
     const blank_count = std.mem.count(u8, line, "░");
     try std.testing.expectEqual(@as(usize, 18), bar_count + blank_count);
+}
+
+test "invalid native percentage falls back when no valid native counts" {
+    const allocator = std.testing.allocator;
+
+    const input = "{\"model\":{\"display_name\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":125.0,\"context_window_size\":128000}}";
+    const usage = try contextUsageFromStatusJson(
+        allocator,
+        input,
+        .{},
+    );
+    defer {
+        if (!std.mem.eql(u8, usage.model, fallback_model)) allocator.free(usage.model);
+    }
+
+    try std.testing.expectEqual(Mode.fallback, usage.mode);
+    try std.testing.expectEqualStrings("deepseek-v4-flash", usage.model);
+    try std.testing.expectEqual(@as(u64, 0), usage.used_tokens);
+    try std.testing.expectEqual(@as(u64, 128_000), usage.max_tokens);
+    try std.testing.expectApproxEqAbs(0.0, usage.percent, 0.0001);
+}
+
+test "overflowing native token sum is ignored" {
+    const allocator = std.testing.allocator;
+
+    const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"total_input_tokens\":10000000000000000000,\"total_output_tokens\":10000000000000000000,\"context_window_size\":128000}}";
+    const usage = try contextUsageFromStatusJson(
+        allocator,
+        input,
+        .{},
+    );
+    defer {
+        if (!std.mem.eql(u8, usage.model, fallback_model)) allocator.free(usage.model);
+    }
+
+    try std.testing.expectEqual(Mode.fallback, usage.mode);
+    try std.testing.expectEqual(@as(u64, 0), usage.used_tokens);
+    try std.testing.expectEqual(@as(u64, 128_000), usage.max_tokens);
+    try std.testing.expectApproxEqAbs(0.0, usage.percent, 0.0001);
+}
+
+test "partially invalid native token fields are ignored" {
+    const allocator = std.testing.allocator;
+
+    const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"total_input_tokens\":1.5,\"total_output_tokens\":1,\"context_window_size\":128000}}";
+    const usage = try contextUsageFromStatusJson(
+        allocator,
+        input,
+        .{},
+    );
+    defer {
+        if (!std.mem.eql(u8, usage.model, fallback_model)) allocator.free(usage.model);
+    }
+
+    try std.testing.expectEqual(Mode.fallback, usage.mode);
+    try std.testing.expectEqual(@as(u64, 0), usage.used_tokens);
+    try std.testing.expectEqual(@as(u64, 128_000), usage.max_tokens);
+    try std.testing.expectApproxEqAbs(0.0, usage.percent, 0.0001);
+}
+
+test "large native integers are not rounded into valid usage" {
+    const allocator = std.testing.allocator;
+
+    const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"total_input_tokens\":9007199254740993,\"context_window_size\":9007199254740992}}";
+    const usage = try contextUsageFromStatusJson(
+        allocator,
+        input,
+        .{},
+    );
+    defer {
+        if (!std.mem.eql(u8, usage.model, fallback_model)) allocator.free(usage.model);
+    }
+
+    try std.testing.expectEqual(Mode.fallback, usage.mode);
+    try std.testing.expectEqual(@as(u64, 0), usage.used_tokens);
+    try std.testing.expectEqual(@as(u64, 128_000), usage.max_tokens);
+    try std.testing.expectApproxEqAbs(0.0, usage.percent, 0.0001);
+}
+
+test "native counts drive used tokens when percentage is also present" {
+    const allocator = std.testing.allocator;
+
+    const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":1.1,\"total_input_tokens\":1234,\"context_window_size\":128000}}";
+    const usage = try contextUsageFromStatusJson(
+        allocator,
+        input,
+        .{},
+    );
+    defer {
+        if (!std.mem.eql(u8, usage.model, fallback_model)) allocator.free(usage.model);
+    }
+
+    try std.testing.expectEqual(Mode.native, usage.mode);
+    try std.testing.expectEqual(@as(u64, 1234), usage.used_tokens);
+    try std.testing.expectEqual(@as(u64, 128_000), usage.max_tokens);
+    try std.testing.expectApproxEqAbs(1.1, usage.percent, 0.0001);
+}
+
+test "valid percentage does not mask invalid native token sum" {
+    const allocator = std.testing.allocator;
+
+    const input = "{\"model\":{\"id\":\"deepseek-v4-flash\"},\"context_window\":{\"used_percentage\":1.0,\"total_input_tokens\":1000,\"total_output_tokens\":1,\"context_window_size\":1000}}";
+    const usage = try contextUsageFromStatusJson(
+        allocator,
+        input,
+        .{},
+    );
+    defer {
+        if (!std.mem.eql(u8, usage.model, fallback_model)) allocator.free(usage.model);
+    }
+
+    try std.testing.expectEqual(Mode.fallback, usage.mode);
+    try std.testing.expectEqual(@as(u64, 0), usage.used_tokens);
+    try std.testing.expectEqual(@as(u64, 1000), usage.max_tokens);
+    try std.testing.expectApproxEqAbs(0.0, usage.percent, 0.0001);
 }

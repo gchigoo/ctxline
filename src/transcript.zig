@@ -67,8 +67,9 @@ pub fn estimateFromJsonlFile(allocator: Allocator, path: []const u8, opts: Estim
 fn readFileLimited(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
     if (max == 0) return try allocator.alloc(u8, 0);
 
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
     defer _ = std.posix.system.close(fd);
+    try ensureRegularFile(fd);
 
     var output = try std.ArrayList(u8).initCapacity(allocator, @min(max, 4096));
     errdefer output.deinit(allocator);
@@ -89,6 +90,38 @@ fn readFileLimited(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
     // bounded prefix instead of failing the whole estimate; any partial trailing
     // JSONL line will be ignored by the line parser.
     return output.toOwnedSlice(allocator);
+}
+
+fn ensureRegularFile(fd: std.posix.fd_t) !void {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .linux) return ensureRegularFileLinux(fd);
+    return ensureRegularFilePosix(fd);
+}
+
+fn ensureRegularFileLinux(fd: std.posix.fd_t) !void {
+    const linux = std.os.linux;
+    var file_stat = std.mem.zeroes(linux.Statx);
+    while (true) {
+        switch (std.posix.errno(linux.statx(@intCast(fd), "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &file_stat))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.NotRegularFile,
+        }
+    }
+    if ((file_stat.mode & linux.S.IFMT) != linux.S.IFREG) return error.NotRegularFile;
+}
+
+fn ensureRegularFilePosix(fd: std.posix.fd_t) !void {
+    const fstat_sym = if (std.posix.lfs64_abi) std.posix.system.fstat64 else std.posix.system.fstat;
+    var file_stat = std.mem.zeroes(std.posix.Stat);
+    while (true) {
+        switch (std.posix.errno(fstat_sym(fd, &file_stat))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.NotRegularFile,
+        }
+    }
+    if ((file_stat.mode & std.posix.S.IFMT) != std.posix.S.IFREG) return error.NotRegularFile;
 }
 
 fn countVisibleBytes(value: std.json.Value, visible_context: bool) u64 {
@@ -157,4 +190,18 @@ test "file estimator keeps bounded prefix for oversized transcripts" {
         .transcript_bytes_per_token = 1,
     });
     try std.testing.expectEqual(@as(u64, 5), estimate);
+}
+
+test "file estimator ignores non-regular paths" {
+    const allocator = std.testing.allocator;
+    const path = "tmp_ctxline_transcript_dir";
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, path) catch {};
+
+    const estimate = estimateFromJsonlFile(allocator, path, .{
+        .max_transcript_bytes = 1024,
+        .transcript_bytes_per_token = 1,
+    });
+
+    try std.testing.expectEqual(@as(u64, 0), estimate);
 }

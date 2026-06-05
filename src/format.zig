@@ -65,6 +65,8 @@ pub fn formatBar(allocator: Allocator, percent: f64, width: usize) ![]const u8 {
 }
 
 pub fn formatStatusLine(allocator: Allocator, model: []const u8, percent: f64, used_tokens: u64, max_tokens: u64, opts: FormatOptions) ![]const u8 {
+    const model_safe = try sanitizeModelText(allocator, model);
+    defer allocator.free(model_safe);
     const percent_text = try formatPercent(allocator, percent);
     defer allocator.free(percent_text);
     const used_text = try formatTokens(allocator, used_tokens);
@@ -77,8 +79,27 @@ pub fn formatStatusLine(allocator: Allocator, model: []const u8, percent: f64, u
     return std.fmt.allocPrint(
         allocator,
         "{s} │ ctx {s}% │ {s}/{s} │ {s}",
-        .{ model, percent_text, used_text, max_text, bar },
+        .{ model_safe, percent_text, used_text, max_text, bar },
     );
+}
+
+const max_model_text_bytes = 64;
+
+fn isUnsafeModelByte(byte: u8) bool {
+    return byte < 0x20 or byte == 0x7f or (byte >= 0x80 and byte <= 0x9f);
+}
+
+fn sanitizeModelText(allocator: Allocator, model: []const u8) ![]const u8 {
+    const target_len = @min(model.len, max_model_text_bytes);
+    var out = try allocator.alloc(u8, target_len);
+    var out_len: usize = 0;
+    var index: usize = 0;
+    while (index < target_len) : (index += 1) {
+        const byte = model[index];
+        out[out_len] = if (isUnsafeModelByte(byte)) '?' else byte;
+        out_len += 1;
+    }
+    return out[0..out_len];
 }
 
 test "format token boundaries" {
@@ -113,4 +134,21 @@ test "format bar rounds to nearest cell and supports custom widths" {
     defer allocator.free(wide);
     try std.testing.expectEqual(@as(usize, 16), std.mem.count(u8, wide, "█"));
     try std.testing.expectEqual(@as(usize, 16), std.mem.count(u8, wide, "░"));
+}
+
+test "format status line sanitizes model control bytes" {
+    const allocator = std.testing.allocator;
+    const model = "deepseek\nv4\t\x1b[31m\rsafe";
+
+    const line = try formatStatusLine(allocator, model, 12.5, 1000, 2000, .{});
+    defer allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "\r") == null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "\t") == null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "\x1b") == null);
+
+    const model_end = std.mem.indexOf(u8, line, " │") orelse unreachable;
+    try std.testing.expect(model_end <= max_model_text_bytes);
+    try std.testing.expect(std.mem.count(u8, line[0..model_end], "\x1b") == 0);
 }
