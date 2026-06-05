@@ -38,7 +38,7 @@ pub fn estimateFromJsonlBytes(allocator: Allocator, bytes: []const u8, opts: Est
             if (index > start) {
                 const line = std.mem.trim(u8, bytes[start..index], " \t\r\n");
                 if (line.len > 0) {
-                    visible_bytes +%= parseLineBytes(allocator, line, opts) orelse 0;
+                    visible_bytes = addVisibleBytes(visible_bytes, parseLineBytes(allocator, line, opts) orelse 0);
                 }
             }
             start = index + 1;
@@ -47,7 +47,7 @@ pub fn estimateFromJsonlBytes(allocator: Allocator, bytes: []const u8, opts: Est
 
     if (opts.transcript_bytes_per_token == 0) return 0;
     if (visible_bytes == 0) return 0;
-    return (visible_bytes + opts.transcript_bytes_per_token - 1) / opts.transcript_bytes_per_token;
+    return std.math.divCeil(u64, visible_bytes, @as(u64, opts.transcript_bytes_per_token)) catch 0;
 }
 
 fn parseLineBytes(allocator: Allocator, line: []const u8, opts: EstimateOptions) ?u64 {
@@ -161,7 +161,7 @@ fn countVisibleBytes(value: std.json.Value, visible_context: bool) u64 {
         .string => |text| if (visible_context) text.len else 0,
         .array => |items| blk: {
             var total: u64 = 0;
-            for (items.items) |entry| total +%= countVisibleBytes(entry, visible_context);
+            for (items.items) |entry| total = addVisibleBytes(total, countVisibleBytes(entry, visible_context));
             break :blk total;
         },
         .object => |obj| blk: {
@@ -171,12 +171,18 @@ fn countVisibleBytes(value: std.json.Value, visible_context: bool) u64 {
                 const key = entry.key_ptr.*;
                 if (isMetadataKey(key)) continue;
                 const child_visible = visible_context or isVisibleKey(key);
-                total +%= countVisibleBytes(entry.value_ptr.*, child_visible);
+                total = addVisibleBytes(total, countVisibleBytes(entry.value_ptr.*, child_visible));
             }
             break :blk total;
         },
         else => 0,
     };
+}
+
+fn addVisibleBytes(current: u64, added: u64) u64 {
+    const sum = @addWithOverflow(current, added);
+    if (sum[1] != 0) return std.math.maxInt(u64);
+    return sum[0];
 }
 
 fn isVisibleKey(key: []const u8) bool {
@@ -222,6 +228,24 @@ test "file estimator keeps bounded prefix for oversized transcripts" {
         .transcript_bytes_per_token = 1,
     });
     try std.testing.expectEqual(@as(u64, 5), estimate);
+}
+
+test "estimateFromJsonlBytes handles huge bytes-per-token values" {
+    const allocator = std.testing.allocator;
+
+    const estimate = estimateFromJsonlBytes(allocator, "{\"content\":\"hi\"}", .{
+        .max_transcript_bytes = 1024,
+        .transcript_bytes_per_token = std.math.maxInt(usize),
+    });
+
+    try std.testing.expectEqual(@as(u64, 1), estimate);
+}
+
+test "visible byte accumulator saturates on u64 overflow" {
+    const near_max = std.math.maxInt(u64) - 10;
+
+    try std.testing.expectEqual(std.math.maxInt(u64), addVisibleBytes(near_max, 11));
+    try std.testing.expectEqual(std.math.maxInt(u64), addVisibleBytes(std.math.maxInt(u64), 1));
 }
 
 test "file estimator ignores non-regular paths" {

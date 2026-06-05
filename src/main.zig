@@ -2,8 +2,44 @@ const std = @import("std");
 
 const ctxline = @import("ctxline");
 
+const usage_text =
+    "Usage: ctxline [--help|-h] [--version]\n" ++
+    "\n" ++
+    "Reads Claude status JSON from stdin and prints a compact context meter.\n" ++
+    "\n" ++
+    "Options:\n" ++
+    "  -h, --help      show usage and exit 0\n" ++
+    "      --version   print `ctxline <version>` and exit 0\n" ++
+    "\n" ++
+    "Examples:\n" ++
+    "  printf '{\"context_window\":{...}}' | ctxline\n" ++
+    "  ctxline --help\n" ++
+    "  ctxline --version";
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+
+    if (args.len > 1) {
+        for (args[1..]) |arg| {
+            if (isHelpArg(arg)) {
+                try writeLine(io, usage_text);
+                return;
+            }
+            if (isVersionArg(arg)) {
+                var version_buffer: [32]u8 = undefined;
+                const version_line = try std.fmt.bufPrint(
+                    &version_buffer,
+                    "ctxline {s}",
+                    .{ctxline.version},
+                );
+                try writeLine(io, version_line);
+                return;
+            }
+        }
+    }
+
     const options = ctxline.Options{};
 
     const input = readBoundedFromStdin(io, options.max_stdin_bytes) catch {
@@ -67,4 +103,12 @@ fn writeLine(io: std.Io, text: []const u8) !void {
     try stdout.writeAll(text);
     try stdout.writeByte('\n');
     try stdout.flush();
+}
+
+fn isHelpArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h");
+}
+
+fn isVersionArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--version");
 }

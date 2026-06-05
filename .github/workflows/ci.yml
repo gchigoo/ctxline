@@ -23,10 +23,38 @@ jobs:
         run: zig build test
       - name: Release build
         run: zig build -Doptimize=ReleaseFast
+      - name: Native smoke
+        run: python3 scripts/smoke.py zig-out/bin/ctxline
       - name: Windows cross-compile (ReleaseFast)
         run: zig build -Dtarget=x86_64-windows -Doptimize=ReleaseFast
       - name: Windows cross-compile ctxline tests (no exec)
         run: zig test src/ctxline.zig -target x86_64-windows -O ReleaseFast --test-no-exec
+
+  macos-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Zig 0.16.0
+        run: |
+          ARCH="$(uname -m)"
+          if [ "$ARCH" = "arm64" ]; then
+            TAR_FILE="zig-aarch64-macos-0.16.0.tar.xz"
+          else
+            TAR_FILE="zig-x86_64-macos-0.16.0.tar.xz"
+          fi
+          curl -fsSL "https://ziglang.org/download/0.16.0/${TAR_FILE}" -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/${TAR_FILE%.tar.xz}" >> "$GITHUB_PATH"
+      - name: Show Zig version
+        run: zig version
+      - name: Format check
+        run: zig fmt build.zig src/*.zig --check
+      - name: Test
+        run: zig build test
+      - name: Release build
+        run: zig build -Doptimize=ReleaseFast
+      - name: Native smoke
+        run: python3 scripts/smoke.py zig-out/bin/ctxline
 
   windows-smoke:
     runs-on: windows-latest
@@ -55,63 +83,4 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = ".\zig-out\bin\ctxline.exe"
-          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-            throw "missing executable: $exe"
-          }
-
-          function Invoke-Ctxline {
-            param([Parameter(Mandatory = $true)][string]$Payload)
-
-            $output = $Payload | & $exe
-            if ($LASTEXITCODE -ne 0) {
-              throw "ctxline exited with code $LASTEXITCODE."
-            }
-
-            $lines = @($output | Where-Object { $_ -ne "" })
-            if ($lines.Count -ne 1) {
-              throw "Expected exactly one output line, got $($lines.Count). Output: $output"
-            }
-
-            return $lines[0]
-          }
-
-          $payload = '{"model":{"id":"deepseek-v4-pro[1m]"},"context_window":{"used_percentage":38.2,"total_input_tokens":380000,"total_output_tokens":2000,"context_window_size":1000000}}'
-          $line = Invoke-Ctxline -Payload $payload
-          if (-not $line.Contains("deepseek-v4-pro[1m]")) {
-            throw "Context payload line missing model: $line"
-          }
-          if (-not $line.Contains("382K/1.0M")) {
-            throw "Context payload line missing context summary: $line"
-          }
-
-          $transcriptFile = Join-Path $env:RUNNER_TEMP "ctxline-transcript-regular.jsonl"
-          Set-Content -Path $transcriptFile -Encoding utf8 -Value '{"message":{"content":"12345678"}}'
-          $payload = @{
-            model = @{ id = "deepseek-v4-flash" }
-            transcript_path = $transcriptFile
-          } | ConvertTo-Json -Compress
-          $line = Invoke-Ctxline -Payload $payload
-          if (-not $line.Contains("deepseek-v4-flash")) {
-            throw "Regular transcript line missing model: $line"
-          }
-          if (-not $line.Contains("3/128K")) {
-            throw "Regular transcript line missing token estimate: $line"
-          }
-          if ($line.Contains("0/128K")) {
-            throw "Regular transcript line unexpectedly reports 0/128K: $line"
-          }
-
-          $transcriptDir = Join-Path $env:RUNNER_TEMP "ctxline-transcript-dir"
-          New-Item -ItemType Directory -Path $transcriptDir -Force | Out-Null
-          $payload = @{
-            model = @{ id = "deepseek-v4-flash" }
-            transcript_path = $transcriptDir
-          } | ConvertTo-Json -Compress
-          $line = Invoke-Ctxline -Payload $payload
-          if (-not $line.Contains("deepseek-v4-flash")) {
-            throw "Directory transcript line missing model: $line"
-          }
-          if (-not $line.Contains("0/128K")) {
-            throw "Directory transcript line missing zero estimate: $line"
-          }
+          python scripts/smoke.py .\zig-out\bin\ctxline.exe

@@ -4,6 +4,7 @@ const models = @import("models.zig");
 const status_json = @import("status_json.zig");
 const transcript = @import("transcript.zig");
 const format = @import("format.zig");
+const version_info = @import("version.zig");
 
 pub const Mode = enum { native, transcript, fallback };
 
@@ -14,6 +15,8 @@ pub const ContextUsage = struct {
     percent: f64,
     mode: Mode,
 };
+
+pub const version = version_info.version;
 
 pub const Options = struct {
     max_stdin_bytes: usize = 256 * 1024,

@@ -1,70 +1,117 @@
 # ctxline
 
-`ctxline` is a tiny Zig CLI for Claude Code status lines. It reads the JSON payload Claude Code sends on stdin and prints a compact one-line context meter.
+`ctxline` is a tiny Zig CLI for Claude Code status output. It reads a status JSON payload from stdin and prints a compact one-line context meter.
 
 ```text
 deepseek-v4-pro[1m] │ ctx 38.2% │ 382K/1.0M │ ███████░░░░░░░░░░░
 ```
 
-## Why
+## Requirements
 
-Claude Code can expose native `context_window.*` status fields for some models, but those fields may be absent when Claude Code is connected to providers such as DeepSeek. `ctxline` prefers native context usage when available and falls back to local transcript estimation via `transcript_path`.
+- Zig `0.16.0`
+- Linux, macOS, or Windows
 
 ## Install
 
 ```sh
+# from source
+
 git clone https://github.com/gchigoo/ctxline.git
 cd ctxline
 zig build -Doptimize=ReleaseFast
 ```
 
-The binary is written to:
+Release binaries are also available from GitHub Releases.
 
-```text
-zig-out/bin/ctxline
+| Platform | Artifact | Download path in payload |
+| --- | --- | --- |
+| Linux | `ctxline-<version>-linux-x86_64.tar.gz` | `/path/to/ctxline` |
+| Linux ARM64 | `ctxline-<version>-linux-aarch64.tar.gz` | `/path/to/ctxline` |
+| macOS Intel | `ctxline-<version>-macos-x86_64.tar.gz` | `/path/to/ctxline` |
+| macOS Apple Silicon | `ctxline-<version>-macos-aarch64.tar.gz` | `/path/to/ctxline` |
+| Windows | `ctxline-<version>-windows-x86_64.zip` | `C:\Path\To\ctxline.exe` |
+
+### Checksum verification
+
+Each release publishes:
+
+- Per-asset SHA256 files (`*.sha256`)
+- A `SHA256SUMS` manifest
+
+Example:
+
+```sh
+# Linux/macOS
+sha256sum -c ctxline-<version>-linux-x86_64.tar.gz.sha256
+sha256sum -c SHA256SUMS
+
+# macOS also has shasum if sha256sum is unavailable
+shasum -a 256 -c ctxline-<version>-macos-aarch64.tar.gz.sha256
+```
+
+```powershell
+# Windows
+Get-FileHash -Algorithm SHA256 ctxline-<version>-windows-x86_64.zip
 ```
 
 ## Claude Code configuration
 
-Add a `statusLine` command to `~/.claude/settings.json`.
+Add a `statusLine` command in `~/.claude/settings.json`.
 
-macOS / Linux:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "/Users/steven/tools/ctxline/zig-out/bin/ctxline",
-    "padding": 1
-  }
-}
-```
-
-Windows:
+### macOS / Linux
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "C:\\Tools\\ctxline\\ctxline.exe",
+    "command": "/absolute/path/to/zig-out/bin/ctxline",
     "padding": 1
   }
 }
 ```
 
-Use the absolute path where you built or installed the binary.
+### Windows
 
-## Behavior
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "C:\\Program Files\\ctxline\\ctxline.exe",
+    "padding": 1
+  }
+}
+```
 
-Resolution order:
+## Usage
 
-1. Read Claude Code status JSON from stdin.
-2. Use native `context_window.used_percentage` if present.
-3. Use native input/output token totals when present.
-4. If native context is absent, read `transcript_path` and estimate visible text tokens from JSONL transcript lines.
-5. Map the model to a max context window and print a single status line.
+```sh
+# show usage and exit 0
+ctxline --help
+ctxline -h
 
-Model defaults:
+# print version and exit 0
+ctxline --version
+
+# normal usage: JSON status payload on stdin
+cat status.json | ctxline
+```
+
+## Runtime behavior
+
+1. Native token counts are preferred when `context_window.total_input_tokens` or `context_window.total_output_tokens` is available; missing count fields are treated as `0`.
+2. If counts are not available, native `used_percentage` is used for display and token estimate.
+3. If native fields are invalid or missing, transcript fallback estimation is used via `transcript_path`.
+4. If native and transcript paths both fail, `ctxline` falls back to `0/<model-window>` style context output and prints safely.
+
+Malformed input prints:
+
+```text
+ctxline │ no status json
+```
+
+Model window mapping is inferred from the model id and falls back to `200K`.
+
+## Model context windows
 
 | Model match | Context window |
 | --- | ---: |
@@ -74,12 +121,6 @@ Model defaults:
 | `claude` + `1m` | 1,000,000 |
 | unknown | 200,000 |
 
-Malformed input prints a safe fallback and exits successfully:
-
-```text
-ctxline │ no status json
-```
-
 ## Development
 
 ```sh
@@ -88,7 +129,7 @@ zig build test
 zig build -Doptimize=ReleaseFast
 ```
 
-If your Zig global cache is not writable:
+If cache is not writable:
 
 ```sh
 mkdir -p .zig-global-cache
@@ -98,8 +139,8 @@ ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache" zig build -Doptimize=ReleaseFast
 
 ## Limitations
 
-- Transcript fallback is an estimate, not an exact tokenizer.
-- MVP reads a bounded transcript prefix and does not keep a persistent cache.
+- Transcript fallback is an estimate, not exact tokenization.
+- No persistent cache is maintained for transcripts.
 - No network calls or provider SDKs are used.
 
 ## License
