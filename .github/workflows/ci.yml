@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - name: Format check
+        run: zig fmt build.zig src/*.zig --check
+      - name: Test
+        run: zig build test
+      - name: Release build
+        run: zig build -Doptimize=ReleaseFast
