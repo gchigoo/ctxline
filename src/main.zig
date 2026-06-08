@@ -70,20 +70,28 @@ fn readBoundedFromStdin(io: std.Io, max_bytes: usize) ![]u8 {
 
     const stdin = std.Io.File.stdin();
     var chunk: [4096]u8 = undefined;
-    var remaining = max_bytes;
+    var maxed_out = false;
 
-    while (remaining > 0) {
-        const read_len = @min(remaining, chunk.len);
+    while (output.items.len < max_bytes) {
+        const read_len = @min(max_bytes - output.items.len, chunk.len);
         const bytes_read = stdin.readStreaming(io, &.{chunk[0..read_len]}) catch |err| switch (err) {
-            error.EndOfStream => 0,
+            error.EndOfStream => break,
             else => return err,
         };
         if (bytes_read == 0) break;
         try output.appendSlice(std.heap.page_allocator, chunk[0..bytes_read]);
-        remaining -= bytes_read;
+
+        // Stop reading once we have a complete JSON value.  This avoids
+        // blocking forever on Windows where Claude Code may not close the
+        // write pipe end after writing the status JSON.
+        if (isCompleteTopLevelJsonValue(output.items)) break;
     }
 
-    if (remaining == 0) {
+    if (output.items.len >= max_bytes) {
+        maxed_out = true;
+    }
+
+    if (maxed_out) {
         var extra: [1]u8 = undefined;
         const extra_bytes = stdin.readStreaming(io, &.{extra[0..]}) catch |err| switch (err) {
             error.EndOfStream => 0,
@@ -93,6 +101,46 @@ fn readBoundedFromStdin(io: std.Io, max_bytes: usize) ![]u8 {
     }
 
     return output.toOwnedSlice(std.heap.page_allocator);
+}
+
+/// Returns true when `data` starts with a complete JSON top-level value
+/// (balanced {} or [], or a self-terminating primitive).  Uses brace/bracket
+/// counting with string-awareness — necessary for statusLine JSON that may
+/// contain literal braces inside string values.
+fn isCompleteTopLevelJsonValue(data: []const u8) bool {
+    if (data.len == 0) return false;
+
+    const first = data[0];
+    const opener: u8, const closer: u8 = switch (first) {
+        '{' => .{ '{', '}' },
+        '[' => .{ '[', ']' },
+        else => return true, // primitives: string, number, bool, null are self-terminating
+    };
+
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) : (i += 1) {
+        const c = data[i];
+        if (c == opener) {
+            depth += 1;
+        } else if (c == closer) {
+            if (depth == 0) return false;
+            depth -= 1;
+            if (depth == 0) return true;
+        } else if (c == '"') {
+            // Skip string content — including escaped characters
+            i += 1;
+            while (i < data.len) : (i += 1) {
+                if (data[i] == '\\') {
+                    i += 1; // skip the escaped character
+                    if (i >= data.len) return false;
+                } else if (data[i] == '"') {
+                    break;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 fn writeLine(io: std.Io, text: []const u8) !void {
