@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 
 const ctxline = @import("ctxline");
@@ -63,6 +64,13 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn readBoundedFromStdin(io: std.Io, max_bytes: usize) ![]u8 {
+    if (builtin.os.tag == .windows) {
+        return readBoundedFromStdinWindows(io, max_bytes);
+    }
+    return readBoundedFromStdinPosix(io, max_bytes);
+}
+
+fn readBoundedFromStdinPosix(io: std.Io, max_bytes: usize) ![]u8 {
     if (max_bytes == 0) return try std.heap.page_allocator.alloc(u8, 0);
 
     var output = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, @min(max_bytes, 4096));
@@ -81,9 +89,7 @@ fn readBoundedFromStdin(io: std.Io, max_bytes: usize) ![]u8 {
         if (bytes_read == 0) break;
         try output.appendSlice(std.heap.page_allocator, chunk[0..bytes_read]);
 
-        // Stop reading once we have a complete JSON value.  This avoids
-        // blocking forever on Windows where Claude Code may not close the
-        // write pipe end after writing the status JSON.
+        // Stop reading once we have a complete JSON value.
         if (isCompleteTopLevelJsonValue(output.items)) break;
     }
 
@@ -98,6 +104,51 @@ fn readBoundedFromStdin(io: std.Io, max_bytes: usize) ![]u8 {
             else => return err,
         };
         if (extra_bytes > 0) return error.InvalidPayload;
+    }
+
+    return output.toOwnedSlice(std.heap.page_allocator);
+}
+
+fn readBoundedFromStdinWindows(io: std.Io, max_bytes: usize) ![]u8 {
+    _ = io;
+    if (max_bytes == 0) return try std.heap.page_allocator.alloc(u8, 0);
+
+    const windows = std.os.windows;
+    const stdin_handle = win32.GetStdHandle(win32.STD_INPUT_HANDLE) orelse return error.InvalidPayload;
+
+    var output = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, @min(max_bytes, 4096));
+    errdefer output.deinit(std.heap.page_allocator);
+
+    var chunk: [4096]u8 = undefined;
+    const timeout_ms: win32.DWORD = 3000;
+
+    while (output.items.len < max_bytes) {
+        const event = win32.CreateEventW(null, @as(win32.BOOL, @enumFromInt(1)), @as(win32.BOOL, @enumFromInt(0)), null) orelse return error.InvalidPayload;
+        defer _ = win32.CloseHandle(event);
+
+        var overlapped: win32.OVERLAPPED = std.mem.zeroes(win32.OVERLAPPED);
+        overlapped.hEvent = event;
+
+        var bytes_read: win32.DWORD = 0;
+        const read_len: win32.DWORD = @intCast(@min(max_bytes - output.items.len, chunk.len));
+
+        const ok = win32.ReadFile(stdin_handle, @ptrCast(&chunk), read_len, &bytes_read, &overlapped);
+        if (@as(c_int, @intFromEnum(ok)) != 0) {
+            // Synchronous completion — data was already available in the pipe.
+        } else if (windows.GetLastError() == @as(windows.Win32Error, @enumFromInt(win32.ERROR_IO_PENDING))) {
+            const wait_result = win32.WaitForSingleObject(event, timeout_ms);
+            if (wait_result != win32.WAIT_OBJECT_0) break; // timeout or error
+            if (@as(c_int, @intFromEnum(win32.GetOverlappedResult(stdin_handle, &overlapped, &bytes_read, @as(win32.BOOL, @enumFromInt(0))))) == 0) {
+                break; // real error
+            }
+        } else {
+            break; // real error, give up
+        }
+
+        if (bytes_read == 0) break;
+        try output.appendSlice(std.heap.page_allocator, chunk[0..bytes_read]);
+
+        if (isCompleteTopLevelJsonValue(output.items)) break;
     }
 
     return output.toOwnedSlice(std.heap.page_allocator);
@@ -160,3 +211,56 @@ fn isHelpArg(arg: []const u8) bool {
 fn isVersionArg(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--version");
 }
+
+// ──────────────────────────────────────────────────────────────
+// Windows kernel32 bindings (not exposed by Zig 0.16 std lib)
+// ──────────────────────────────────────────────────────────────
+
+const win32 = struct {
+    const windows = std.os.windows;
+    const DWORD = windows.DWORD;
+    const BOOL = windows.BOOL;
+    const HANDLE = windows.HANDLE;
+    const LPVOID = windows.LPVOID;
+    const LPCWSTR = windows.LPCWSTR;
+
+    const STD_INPUT_HANDLE: DWORD = @bitCast(@as(i32, -10));
+    const INFINITE: DWORD = 0xFFFF_FFFF;
+    const WAIT_OBJECT_0: DWORD = 0;
+    const ERROR_IO_PENDING: u32 = 997;
+    const WAIT_TIMEOUT: DWORD = 258;
+
+    const OVERLAPPED = extern struct {
+        Internal: usize,
+        InternalHigh: usize,
+        Offset: DWORD,
+        OffsetHigh: DWORD,
+        hEvent: ?HANDLE,
+    };
+
+    extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn ReadFile(
+        hFile: HANDLE,
+        lpBuffer: [*]u8,
+        nNumberOfBytesToRead: DWORD,
+        lpNumberOfBytesRead: *DWORD,
+        lpOverlapped: ?*OVERLAPPED,
+    ) callconv(.winapi) BOOL;
+    extern "kernel32" fn CreateEventW(
+        lpEventAttributes: ?*windows.SECURITY_ATTRIBUTES,
+        bManualReset: BOOL,
+        bInitialState: BOOL,
+        lpName: ?LPCWSTR,
+    ) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn WaitForSingleObject(
+        hHandle: HANDLE,
+        dwMilliseconds: DWORD,
+    ) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetOverlappedResult(
+        hFile: HANDLE,
+        lpOverlapped: *OVERLAPPED,
+        lpNumberOfBytesTransferred: *DWORD,
+        bWait: BOOL,
+    ) callconv(.winapi) BOOL;
+    extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
+};
