@@ -84,3 +84,22 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           python scripts/smoke.py .\zig-out\bin\ctxline.exe
+      - name: Windows native pipe smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $payload = '{"model":{"id":"deepseek-v4-pro[1m]"},"context_window":{"used_percentage":38.2,"total_input_tokens":380000,"total_output_tokens":2000,"context_window_size":1000000}}'
+          $binary = (Resolve-Path .\zig-out\bin\ctxline.exe).Path
+          $tmp = New-TemporaryFile
+          [System.IO.File]::WriteAllText($tmp.FullName, $payload, [System.Text.UTF8Encoding]::new($false))
+          try {
+            $output = cmd.exe /d /s /c "type ""$($tmp.FullName)"" | ""$binary"""
+            if ($LASTEXITCODE -ne 0) {
+              throw "ctxline.exe exited with code $LASTEXITCODE"
+            }
+            if ($output -notmatch 'deepseek-v4-pro\[1m\].*382K/1\.0M') {
+              throw "Unexpected native pipe output: $output"
+            }
+          } finally {
+            Remove-Item -LiteralPath $tmp.FullName -Force -ErrorAction SilentlyContinue
+          }

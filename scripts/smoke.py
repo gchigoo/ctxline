@@ -2,8 +2,10 @@
 import argparse
 import json
 import os
+import queue
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +45,61 @@ def smoke_native(binary: Path) -> None:
     assert_contains(line, "deepseek-v4-pro[1m]")
     assert_contains(line, "38.2%")
     assert_contains(line, "382K/1.0M")
+
+
+def smoke_native_without_stdin_eof(binary: Path) -> None:
+    payload = '{"model":{"id":"deepseek-v4-pro[1m]"},"context_window":{"used_percentage":38.2,"total_input_tokens":380000,"total_output_tokens":2000,"context_window_size":1000000}}'
+    process = subprocess.Popen(
+        [str(binary)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if process.stdin is None or process.stdout is None:
+        raise RuntimeError("Failed to open ctxline pipes")
+
+    lines: queue.Queue[str] = queue.Queue(maxsize=1)
+
+    def read_stdout() -> None:
+        try:
+            lines.put(process.stdout.readline())
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            lines.put(f"read error: {exc}")
+
+    reader = threading.Thread(target=read_stdout, daemon=True)
+    reader.start()
+
+    try:
+        process.stdin.write(payload)
+        process.stdin.flush()
+
+        try:
+            line = lines.get(timeout=2.0).rstrip("\r\n")
+        except queue.Empty as exc:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+            process.kill()
+            _, stderr = process.communicate(timeout=1.0)
+            raise RuntimeError(f"ctxline did not emit output before stdin EOF: {stderr!r}") from exc
+
+        assert_contains(line, "deepseek-v4-pro[1m]")
+        assert_contains(line, "38.2%")
+        assert_contains(line, "382K/1.0M")
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+
+    return_code = process.wait(timeout=2.0)
+    if return_code != 0:
+        stderr = process.stderr.read() if process.stderr is not None else ""
+        raise RuntimeError(f"ctxline failed with code {return_code}: {stderr!r}")
 
 
 def smoke_malformed_fallback(binary: Path) -> None:
@@ -103,6 +160,7 @@ def main() -> None:
             raise RuntimeError(f"Binary not found: {binary}")
 
         smoke_native(binary)
+        smoke_native_without_stdin_eof(binary)
         smoke_malformed_fallback(binary)
         smoke_transcript_regular(binary, scratch)
         smoke_transcript_directory(binary, scratch)

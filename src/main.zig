@@ -113,36 +113,31 @@ fn readBoundedFromStdinWindows(io: std.Io, max_bytes: usize) ![]u8 {
     _ = io;
     if (max_bytes == 0) return try std.heap.page_allocator.alloc(u8, 0);
 
-    const windows = std.os.windows;
     const stdin_handle = win32.GetStdHandle(win32.STD_INPUT_HANDLE) orelse return error.InvalidPayload;
 
+    const file_type = win32.GetFileType(stdin_handle) & win32.FILE_TYPE_MASK;
+    return switch (file_type) {
+        win32.FILE_TYPE_CHAR => try std.heap.page_allocator.alloc(u8, 0),
+        win32.FILE_TYPE_DISK => readBoundedFromWindowsFile(stdin_handle, max_bytes),
+        win32.FILE_TYPE_PIPE => readBoundedFromWindowsPipe(stdin_handle, max_bytes),
+        else => try std.heap.page_allocator.alloc(u8, 0),
+    };
+}
+
+fn readBoundedFromWindowsFile(handle: win32.HANDLE, max_bytes: usize) ![]u8 {
     var output = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, @min(max_bytes, 4096));
     errdefer output.deinit(std.heap.page_allocator);
 
     var chunk: [4096]u8 = undefined;
-    const timeout_ms: win32.DWORD = 3000;
 
     while (output.items.len < max_bytes) {
-        const event = win32.CreateEventW(null, @as(win32.BOOL, @enumFromInt(1)), @as(win32.BOOL, @enumFromInt(0)), null) orelse return error.InvalidPayload;
-        defer _ = win32.CloseHandle(event);
-
-        var overlapped: win32.OVERLAPPED = std.mem.zeroes(win32.OVERLAPPED);
-        overlapped.hEvent = event;
-
         var bytes_read: win32.DWORD = 0;
         const read_len: win32.DWORD = @intCast(@min(max_bytes - output.items.len, chunk.len));
 
-        const ok = win32.ReadFile(stdin_handle, @ptrCast(&chunk), read_len, &bytes_read, &overlapped);
-        if (@as(c_int, @intFromEnum(ok)) != 0) {
-            // Synchronous completion — data was already available in the pipe.
-        } else if (windows.GetLastError() == @as(windows.Win32Error, @enumFromInt(win32.ERROR_IO_PENDING))) {
-            const wait_result = win32.WaitForSingleObject(event, timeout_ms);
-            if (wait_result != win32.WAIT_OBJECT_0) break; // timeout or error
-            if (@as(c_int, @intFromEnum(win32.GetOverlappedResult(stdin_handle, &overlapped, &bytes_read, @as(win32.BOOL, @enumFromInt(0))))) == 0) {
-                break; // real error
-            }
-        } else {
-            break; // real error, give up
+        if (!isWin32True(win32.ReadFile(handle, @ptrCast(&chunk), read_len, &bytes_read, null))) {
+            const err = std.os.windows.GetLastError();
+            if (isExpectedEndOfWindowsInput(err)) break;
+            return error.InvalidPayload;
         }
 
         if (bytes_read == 0) break;
@@ -151,7 +146,67 @@ fn readBoundedFromStdinWindows(io: std.Io, max_bytes: usize) ![]u8 {
         if (isCompleteTopLevelJsonValue(output.items)) break;
     }
 
+    if (output.items.len >= max_bytes and !isCompleteTopLevelJsonValue(output.items)) {
+        return error.InvalidPayload;
+    }
+
     return output.toOwnedSlice(std.heap.page_allocator);
+}
+
+fn readBoundedFromWindowsPipe(handle: win32.HANDLE, max_bytes: usize) ![]u8 {
+    var output = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, @min(max_bytes, 4096));
+    errdefer output.deinit(std.heap.page_allocator);
+
+    var chunk: [4096]u8 = undefined;
+    var deadline = win32.GetTickCount64() + win32.STDIN_PIPE_TIMEOUT_MS;
+
+    while (output.items.len < max_bytes) {
+        var available: win32.DWORD = 0;
+        if (!isWin32True(win32.PeekNamedPipe(handle, null, 0, null, &available, null))) {
+            const err = std.os.windows.GetLastError();
+            if (isExpectedEndOfWindowsInput(err)) break;
+            return error.InvalidPayload;
+        }
+
+        if (available == 0) {
+            if (win32.GetTickCount64() >= deadline) break;
+            win32.Sleep(win32.STDIN_PIPE_POLL_MS);
+            continue;
+        }
+
+        var bytes_read: win32.DWORD = 0;
+        const remaining = max_bytes - output.items.len;
+        const available_usize: usize = @intCast(available);
+        const read_len: win32.DWORD = @intCast(@min(@min(remaining, chunk.len), available_usize));
+
+        if (!isWin32True(win32.ReadFile(handle, @ptrCast(&chunk), read_len, &bytes_read, null))) {
+            const err = std.os.windows.GetLastError();
+            if (isExpectedEndOfWindowsInput(err)) break;
+            return error.InvalidPayload;
+        }
+
+        if (bytes_read == 0) break;
+        try output.appendSlice(std.heap.page_allocator, chunk[0..bytes_read]);
+
+        if (isCompleteTopLevelJsonValue(output.items)) break;
+        deadline = win32.GetTickCount64() + win32.STDIN_PIPE_TIMEOUT_MS;
+    }
+
+    if (output.items.len >= max_bytes and !isCompleteTopLevelJsonValue(output.items)) {
+        return error.InvalidPayload;
+    }
+
+    return output.toOwnedSlice(std.heap.page_allocator);
+}
+
+fn isWin32True(value: win32.BOOL) bool {
+    return @as(c_int, @intFromEnum(value)) != 0;
+}
+
+fn isExpectedEndOfWindowsInput(err: std.os.windows.Win32Error) bool {
+    return err == @as(std.os.windows.Win32Error, @enumFromInt(win32.ERROR_BROKEN_PIPE)) or
+        err == @as(std.os.windows.Win32Error, @enumFromInt(win32.ERROR_HANDLE_EOF)) or
+        err == @as(std.os.windows.Win32Error, @enumFromInt(win32.ERROR_NO_DATA));
 }
 
 /// Returns true when `data` starts with a complete JSON top-level value
@@ -221,46 +276,36 @@ const win32 = struct {
     const DWORD = windows.DWORD;
     const BOOL = windows.BOOL;
     const HANDLE = windows.HANDLE;
-    const LPVOID = windows.LPVOID;
-    const LPCWSTR = windows.LPCWSTR;
 
     const STD_INPUT_HANDLE: DWORD = @bitCast(@as(i32, -10));
-    const INFINITE: DWORD = 0xFFFF_FFFF;
-    const WAIT_OBJECT_0: DWORD = 0;
-    const ERROR_IO_PENDING: u32 = 997;
-    const WAIT_TIMEOUT: DWORD = 258;
-
-    const OVERLAPPED = extern struct {
-        Internal: usize,
-        InternalHigh: usize,
-        Offset: DWORD,
-        OffsetHigh: DWORD,
-        hEvent: ?HANDLE,
-    };
+    const FILE_TYPE_UNKNOWN: DWORD = 0x0000;
+    const FILE_TYPE_DISK: DWORD = 0x0001;
+    const FILE_TYPE_CHAR: DWORD = 0x0002;
+    const FILE_TYPE_PIPE: DWORD = 0x0003;
+    const FILE_TYPE_MASK: DWORD = 0x000f;
+    const ERROR_HANDLE_EOF: u32 = 38;
+    const ERROR_BROKEN_PIPE: u32 = 109;
+    const ERROR_NO_DATA: u32 = 232;
+    const STDIN_PIPE_TIMEOUT_MS: u64 = 3000;
+    const STDIN_PIPE_POLL_MS: DWORD = 10;
 
     extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn GetFileType(hFile: HANDLE) callconv(.winapi) DWORD;
     extern "kernel32" fn ReadFile(
         hFile: HANDLE,
         lpBuffer: [*]u8,
         nNumberOfBytesToRead: DWORD,
         lpNumberOfBytesRead: *DWORD,
-        lpOverlapped: ?*OVERLAPPED,
+        lpOverlapped: ?*anyopaque,
     ) callconv(.winapi) BOOL;
-    extern "kernel32" fn CreateEventW(
-        lpEventAttributes: ?*windows.SECURITY_ATTRIBUTES,
-        bManualReset: BOOL,
-        bInitialState: BOOL,
-        lpName: ?LPCWSTR,
-    ) callconv(.winapi) ?HANDLE;
-    extern "kernel32" fn WaitForSingleObject(
-        hHandle: HANDLE,
-        dwMilliseconds: DWORD,
-    ) callconv(.winapi) DWORD;
-    extern "kernel32" fn GetOverlappedResult(
-        hFile: HANDLE,
-        lpOverlapped: *OVERLAPPED,
-        lpNumberOfBytesTransferred: *DWORD,
-        bWait: BOOL,
+    extern "kernel32" fn PeekNamedPipe(
+        hNamedPipe: HANDLE,
+        lpBuffer: ?[*]u8,
+        nBufferSize: DWORD,
+        lpBytesRead: ?*DWORD,
+        lpTotalBytesAvail: ?*DWORD,
+        lpBytesLeftThisMessage: ?*DWORD,
     ) callconv(.winapi) BOOL;
-    extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+    extern "kernel32" fn Sleep(dwMilliseconds: DWORD) callconv(.winapi) void;
 };

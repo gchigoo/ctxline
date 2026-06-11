@@ -72,6 +72,8 @@ Add a `statusLine` command in `~/.claude/settings.json`.
 
 ### Windows
 
+Use `ctxline.exe` directly:
+
 ```json
 {
   "statusLine": {
