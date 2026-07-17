@@ -1,6 +1,6 @@
 # ctxline
 
-`ctxline` is a tiny Zig CLI for Claude Code status output. It reads a status JSON payload from stdin and prints a compact one-line context meter.
+`ctxline` is a tiny Rust CLI for Claude Code status output. It reads a status JSON payload from stdin and prints a compact one-line context meter.
 
 ```text
 deepseek-v4-pro[1m] │ ctx 38.2% │ 382K/1.0M │ ███████░░░░░░░░░░░
@@ -8,17 +8,16 @@ deepseek-v4-pro[1m] │ ctx 38.2% │ 382K/1.0M │ ███████░░�
 
 ## Requirements
 
-- Zig `0.16.0`
+- Rust `1.85+`
 - Linux, macOS, or Windows
 
 ## Install
 
 ```sh
 # from source
-
 git clone https://github.com/gchigoo/ctxline.git
 cd ctxline
-zig build -Doptimize=ReleaseFast
+cargo build --release
 ```
 
 Release binaries are also available from GitHub Releases.
@@ -64,7 +63,7 @@ Add a `statusLine` command in `~/.claude/settings.json`.
 {
   "statusLine": {
     "type": "command",
-    "command": "/absolute/path/to/zig-out/bin/ctxline",
+    "command": "/absolute/path/to/target/release/ctxline",
     "padding": 1
   }
 }
@@ -87,14 +86,9 @@ Use `ctxline.exe` directly:
 ## Usage
 
 ```sh
-# show usage and exit 0
 ctxline --help
 ctxline -h
-
-# print version and exit 0
 ctxline --version
-
-# normal usage: JSON status payload on stdin
 cat status.json | ctxline
 ```
 
@@ -126,18 +120,13 @@ Model window mapping is inferred from the model id and falls back to `200K`.
 ## Development
 
 ```sh
-zig fmt build.zig src/*.zig
-zig build test
-zig build -Doptimize=ReleaseFast
+cargo fmt --check
+cargo test
+cargo build --release
+python scripts/smoke.py target/release/ctxline
 ```
 
-If cache is not writable:
-
-```sh
-mkdir -p .zig-global-cache
-ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache" zig build test
-ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache" zig build -Doptimize=ReleaseFast
-```
+On Windows, use `target\\release\\ctxline.exe` for the smoke script.
 
 ## Limitations
 

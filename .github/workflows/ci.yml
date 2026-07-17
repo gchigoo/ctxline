@@ -10,86 +10,58 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install Zig 0.16.0
-        run: |
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
-      - name: Show Zig version
-        run: zig version
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
       - name: Format check
-        run: zig fmt build.zig src/*.zig --check
+        run: cargo fmt --check
       - name: Test
-        run: zig build test
+        run: cargo test --locked
       - name: Release build
-        run: zig build -Doptimize=ReleaseFast
+        run: cargo build --release --locked
       - name: Native smoke
-        run: python3 scripts/smoke.py zig-out/bin/ctxline
-      - name: Windows cross-compile (ReleaseFast)
-        run: zig build -Dtarget=x86_64-windows -Doptimize=ReleaseFast
-      - name: Windows cross-compile ctxline tests (no exec)
-        run: zig test src/ctxline.zig -target x86_64-windows -O ReleaseFast --test-no-exec
+        run: python3 scripts/smoke.py target/release/ctxline
+      - name: Check Windows target compilation
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          cargo check --locked --target x86_64-pc-windows-gnu
 
   macos-test:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install Zig 0.16.0
-        run: |
-          ARCH="$(uname -m)"
-          if [ "$ARCH" = "arm64" ]; then
-            TAR_FILE="zig-aarch64-macos-0.16.0.tar.xz"
-          else
-            TAR_FILE="zig-x86_64-macos-0.16.0.tar.xz"
-          fi
-          curl -fsSL "https://ziglang.org/download/0.16.0/${TAR_FILE}" -o zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/${TAR_FILE%.tar.xz}" >> "$GITHUB_PATH"
-      - name: Show Zig version
-        run: zig version
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
       - name: Format check
-        run: zig fmt build.zig src/*.zig --check
+        run: cargo fmt --check
       - name: Test
-        run: zig build test
+        run: cargo test --locked
       - name: Release build
-        run: zig build -Doptimize=ReleaseFast
+        run: cargo build --release --locked
       - name: Native smoke
-        run: python3 scripts/smoke.py zig-out/bin/ctxline
+        run: python3 scripts/smoke.py target/release/ctxline
 
   windows-smoke:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - name: Install Zig 0.16.0
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $ProgressPreference = "SilentlyContinue"
-          $url = "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip"
-          $zipPath = Join-Path $env:RUNNER_TEMP "zig-0.16.0.zip"
-          $extractPath = Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-0.16.0"
-
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
-          Expand-Archive -Path $zipPath -DestinationPath $env:RUNNER_TEMP -Force
-          "$extractPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Show Zig version
-        run: zig version
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
       - name: Test
-        run: zig build test
+        run: cargo test --locked
       - name: Release build
-        run: zig build -Doptimize=ReleaseFast
+        run: cargo build --release --locked
       - name: Runtime smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          python scripts/smoke.py .\zig-out\bin\ctxline.exe
+          python scripts/smoke.py .\target\release\ctxline.exe
       - name: Windows native pipe smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $payload = '{"model":{"id":"deepseek-v4-pro[1m]"},"context_window":{"used_percentage":38.2,"total_input_tokens":380000,"total_output_tokens":2000,"context_window_size":1000000}}'
-          $binary = (Resolve-Path .\zig-out\bin\ctxline.exe).Path
+          $binary = (Resolve-Path .\target\release\ctxline.exe).Path
           $tmp = New-TemporaryFile
           [System.IO.File]::WriteAllText($tmp.FullName, $payload, [System.Text.UTF8Encoding]::new($false))
           try {
